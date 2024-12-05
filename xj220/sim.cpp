@@ -1,6 +1,9 @@
+#include <cstdlib>
 #include <ncurses.h>
 #include <unistd.h>
 #include <thread>
+#include <map>
+#include <vector>
 #include <cstring>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -8,35 +11,148 @@
 
 #define SERVPORT 5555
 
-void readMem(WINDOW* logWindow, int clientSock)
+enum class RState
 {
-  uint8_t in = 0;
-  if (read(clientSock, &in, 1) == 1)
-  {
-    
-  }
+  Cmd,
+  WriteAddrHi,
+  WriteAddrLo,
+  WriteValue,
+  ReadAddrHi,
+  ReadAddrLo,
+  ReadNumBytesHi,
+  ReadNumBytesLo
+};
+
+void echo(int clientSock, uint8_t byte, WINDOW* logWindow)
+{
+  // Echoes are the two's-complement of the byte being echoed
+  const uint8_t inverted = ~byte + 1;
+  wprintw(logWindow, "<%02X> ", inverted);
+  wrefresh(logWindow);
+  write(clientSock, &inverted, 1);
 }
 
-void clientConnectionHandler(bool& quit, WINDOW* logWindow, int clientSock)
+void clientConnectionHandler(bool& quit,
+                             WINDOW* logWindow,
+                             int clientSock,
+                             const std::vector<uint8_t>& dataFrame,
+                             std::map<uint16_t,uint8_t>& memory)
 {
-  uint8_t c = 0;
-  uint8_t outbyte = 0;
+  RState state = RState::Cmd;
+  uint8_t in = 0;
+  uint8_t out = 0;
+  uint16_t address = 0;
+  uint16_t bytecount = 0;
+  uint8_t checksum = 0;
+
   while (!quit)
   {
-    int bytesRead = read(clientSock, &c, 1);
-    if (bytesRead == 1)
+    if (read(clientSock, &in, 1) == 1)
     {
-      wprintw(logWindow, "%02X ", c);
+      if (state == RState::Cmd)
+      {
+        wprintw(logWindow, "\n");
+      }
+      wprintw(logWindow, "%02X ", in);
       wrefresh(logWindow);
 
-      outbyte = ~c;
-      write(clientSock, &outbyte, 1);
-      readMem(logWindow, clientSock);
+      switch (state)
+      {
+      case RState::Cmd:
+        switch (in)
+        {
+        case 0x02:
+          echo(clientSock, in, logWindow);
+          checksum = 0;
+          wprintw(logWindow, "\nSending data frame of %d bytes", dataFrame.size());
+          wrefresh(logWindow);
+          for (auto dataFrameByte : dataFrame)
+          {
+            checksum += dataFrameByte;
+            out = ~dataFrameByte + 1;
+            write(clientSock, &out, 1);
+          }
+          out = ~(0xff - checksum) + 1;
+          write(clientSock, &out, 1);
+          break;
+        case 0x03:
+          state = RState::ReadAddrHi;
+          echo(clientSock, in, logWindow);
+          break;
+        case 0x08:
+          state = RState::WriteAddrHi;
+          echo(clientSock, in, logWindow);
+          break;
+        default:
+          wprintw(logWindow, "Cmd byte unknown.");
+          wrefresh(logWindow);
+        }
+        break;
+
+      case RState::ReadAddrHi:
+        address = static_cast<uint16_t>(in) << 8;
+        state = RState::ReadAddrLo;
+        echo(clientSock, in, logWindow);
+        break;
+
+      case RState::ReadAddrLo:
+        address |= in;
+        state = RState::ReadNumBytesHi;
+        echo(clientSock, in, logWindow);
+        break;
+
+      case RState::ReadNumBytesHi:
+        bytecount = static_cast<uint16_t>(in) << 8;
+        state = RState::ReadNumBytesLo;
+        echo(clientSock, in, logWindow);
+        break;
+
+      case RState::ReadNumBytesLo:
+        bytecount |= in;
+        echo(clientSock, in, logWindow);
+        wprintw(logWindow, "\nReading %d byte(s) starting at offset %04X.\n", bytecount, address);
+        wrefresh(logWindow);
+        checksum = 0;
+        for (uint16_t cAddr = address; cAddr < (address + bytecount); cAddr++)
+        {
+          checksum += memory[cAddr];
+          out = ~(memory[cAddr] - 1);
+          wprintw(logWindow, "<%02X> ", out);
+          wrefresh(logWindow);
+          write(clientSock, &out, 1);
+        }
+        state = RState::Cmd;
+        break;
+
+      case RState::WriteAddrHi:
+        address = static_cast<uint16_t>(in) << 8;
+        state = RState::WriteAddrLo;
+        echo(clientSock, in, logWindow);
+        break;
+
+      case RState::WriteAddrLo:
+        address |= in;
+        state = RState::WriteValue;
+        echo(clientSock, in, logWindow);
+        break;
+
+      case RState::WriteValue:
+        echo(clientSock, in, logWindow);
+        out = 0x0F;
+        write(clientSock, &out, 1);
+        memory[address] = in;
+        state = RState::Cmd;
+        break;
+      }
     }
   }
 }
 
-void server(bool& quit, WINDOW* logWindow, int& servSock)
+void server(bool& quit,
+            WINDOW* logWindow,
+            int& servSock,
+            const std::vector<uint8_t>& dataFrame,
+            std::map<uint16_t,uint8_t>& memory)
 {
   wprintw(logWindow, "Starting listener...\n");
   wrefresh(logWindow);
@@ -63,7 +179,7 @@ void server(bool& quit, WINDOW* logWindow, int& servSock)
           {
             wprintw(logWindow, "Client connected.\n");
             wrefresh(logWindow);
-            clientConnectionHandler(quit, logWindow, clientSock);
+            clientConnectionHandler(quit, logWindow, clientSock, dataFrame, memory);
             wprintw(logWindow, "Client disconnected.\n");
             wrefresh(logWindow);
           }
@@ -104,6 +220,10 @@ int main(void)
   char cmdbuf[80];
   constexpr int cmdWindowLines = 10;
 
+  std::vector<uint8_t> dataFrame;
+  dataFrame.resize(68);
+  std::map<uint16_t,uint8_t> memoryContent;// = { { 0xFFDE, 0x36 } };
+
   initscr();
   getmaxyx(stdscr, height, width);
   WINDOW* logWindow = newwin(height - cmdWindowLines, width, 0, 0);
@@ -117,12 +237,19 @@ int main(void)
   wrefresh(cmdBorderWindow);
 
   int servSock = -1;
-  std::thread serverThread(server, std::ref(quit), logWindow, std::ref(servSock));
+  std::thread serverThread(server,
+                           std::ref(quit),
+                           logWindow,
+                           std::ref(servSock),
+                           std::ref(dataFrame),
+                           std::ref(memoryContent));
+  wprintw(logWindow, "Data frame contains %d bytes.\n", dataFrame.size());
+  wrefresh(logWindow);
 
   while (!quit)
   {
     wgetnstr(cmdWindow, cmdbuf, sizeof(cmdbuf) - 1);
-    if (strcmp(cmdbuf, "q") == 0)
+    if (cmdbuf[0] == 'q')
     {
       quit = true;
       if (servSock >= 0)
@@ -131,6 +258,12 @@ int main(void)
         wrefresh(cmdWindow);
         shutdown(servSock, SHUT_RDWR);
       }
+    }
+    else if (cmdbuf[0] == 'd')
+    {
+    }
+    else if (cmdbuf[0] == 'm')
+    {
     }
   }
 
