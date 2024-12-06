@@ -51,7 +51,9 @@ void clientConnectionHandler(bool& quit,
     {
       if (state == RState::Cmd)
       {
-        wprintw(logWindow, "\n");
+        const auto duration = std::chrono::system_clock::now().time_since_epoch();
+        const double secs = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count() / 1000.0;
+        wprintw(logWindow, "\n[%.3f] ", secs);
       }
       wprintw(logWindow, "%02X ", in);
       wrefresh(logWindow);
@@ -121,6 +123,17 @@ void clientConnectionHandler(bool& quit,
           wrefresh(logWindow);
           write(clientSock, &out, 1);
         }
+
+        // Newer revisions of the ECU firmware send a checksum at the end
+        // of the memory read block.
+        if (memory[0xFFDE] >= 0x36)
+        {
+          out = ~(0xff - checksum) + 1;
+          wprintw(logWindow, "{%02X} ", out);
+          wrefresh(logWindow);
+          write(clientSock, &out, 1);
+        }
+
         state = RState::Cmd;
         break;
 
@@ -222,7 +235,7 @@ int main(void)
 
   std::vector<uint8_t> dataFrame;
   dataFrame.resize(68);
-  std::map<uint16_t,uint8_t> memoryContent;// = { { 0xFFDE, 0x36 } };
+  std::map<uint16_t,uint8_t> memoryContent = { { 0xFFDE, 0x36 } };
 
   initscr();
   getmaxyx(stdscr, height, width);
