@@ -261,9 +261,21 @@ int main(void)
     }
     else if (cmdbuf[0] == 'd')
     {
+      char* p = strtok(&cmdbuf[2], " ");
+      uint16_t offset = strtoul(p, NULL, 16);
+      p = strtok(NULL, " ");
+      uint8_t value = strtoul(p, NULL, 0);
+      dataFrame[offset] = value;
+      wprintw(cmdWindow, "Set data frame byte %04X to %02X\n", offset, value);
     }
     else if (cmdbuf[0] == 'm')
     {
+      char* p = strtok(&cmdbuf[2], " ");
+      uint16_t offset = strtoul(p, NULL, 16);
+      p = strtok(NULL, " ");
+      uint8_t value = strtoul(p, NULL, 0);
+      memoryContent[offset] = value;
+      wprintw(cmdWindow, "Set memory byte at %04X to %02X\n", offset, value);
     }
   }
 
