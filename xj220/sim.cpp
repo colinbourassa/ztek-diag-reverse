@@ -63,7 +63,7 @@ void clientConnectionHandler(bool& quit,
       case RState::Cmd:
         switch (in)
         {
-        case 0x02:
+        case 0x02: // Request for fixed-length data frame
           echo(clientSock, in, logWindow);
           checksum = 0;
           wprintw(logWindow, "\nSending data frame of %d bytes", dataFrame.size());
@@ -77,11 +77,11 @@ void clientConnectionHandler(bool& quit,
           out = ~(0xff - checksum) + 1;
           write(clientSock, &out, 1);
           break;
-        case 0x03:
+        case 0x03: // Request to read memory
           state = RState::ReadAddrHi;
           echo(clientSock, in, logWindow);
           break;
-        case 0x08:
+        case 0x08: // Request to write memory
           state = RState::WriteAddrHi;
           echo(clientSock, in, logWindow);
           break;
@@ -151,9 +151,8 @@ void clientConnectionHandler(bool& quit,
 
       case RState::WriteValue:
         echo(clientSock, in, logWindow);
-        out = 0x0F;
-        write(clientSock, &out, 1);
         memory[address] = in;
+        echo(clientSock, 0x0F, logWindow); // Indication that the write is complete
         state = RState::Cmd;
         break;
       }
@@ -275,20 +274,32 @@ int main(void)
     else if (cmdbuf[0] == 'd')
     {
       char* p = strtok(&cmdbuf[2], " ");
-      uint16_t offset = strtoul(p, NULL, 16);
-      p = strtok(NULL, " ");
-      uint8_t value = strtoul(p, NULL, 0);
-      dataFrame[offset] = value;
-      wprintw(cmdWindow, "Set data frame byte %04X to %02X\n", offset, value);
+      if (p)
+      {
+        uint16_t offset = strtoul(p, NULL, 16);
+        p = strtok(NULL, " ");
+        if (p)
+        {
+          uint8_t value = strtoul(p, NULL, 0);
+          dataFrame[offset] = value;
+          wprintw(cmdWindow, "Set data frame byte %04X to %02X\n", offset, value);
+        }
+      }
     }
     else if (cmdbuf[0] == 'm')
     {
       char* p = strtok(&cmdbuf[2], " ");
-      uint16_t offset = strtoul(p, NULL, 16);
-      p = strtok(NULL, " ");
-      uint8_t value = strtoul(p, NULL, 0);
-      memoryContent[offset] = value;
-      wprintw(cmdWindow, "Set memory byte at %04X to %02X\n", offset, value);
+      if (p)
+      {
+        uint16_t offset = strtoul(p, NULL, 16);
+        p = strtok(NULL, " ");
+        if (p)
+        {
+          uint8_t value = strtoul(p, NULL, 0);
+          memoryContent[offset] = value;
+          wprintw(cmdWindow, "Set memory byte at %04X to %02X\n", offset, value);
+        }
+      }
     }
   }
 
